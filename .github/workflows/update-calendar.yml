@@ -1,41 +1,107 @@
-name: Update RAPLA Calendar
+name: Diagnose RAPLA
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 */3 * * *"
-
-permissions:
-  contents: write
 
 jobs:
-  update:
+  diagnose:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Create output folder
-        run: mkdir -p output
-
-      - name: Generate ICS
+      - name: Download RAPLA page
+        env:
+          RAPLA_URL: ${{ secrets.RAPLA_URL }}
         run: |
-          docker run --rm \
-            -e RAPLA_URL="${{ secrets.RAPLA_URL }}" \
-            -e RAPLA_START_YEAR="2026" \
-            -e RAPLA_COURSE="VS-WBK25A" \
-            -v "$PWD/output:/app/ics_files" \
-            juliangroshaupt/dhbw_rapla-to-ics
+          curl --fail --location --silent --show-error \
+            "$RAPLA_URL" \
+            -o rapla.html
 
-      - name: Find calendar file
-        run: |
-          find output -name "CALENDAR.ics" -exec cp {} calendar.ics \;
+          echo "Downloaded RAPLA page"
+          echo "Size: $(wc -c < rapla.html) bytes"
 
-      - name: Commit calendar
+      - name: Create safe diagnostic
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add calendar.ics
-          git diff --cached --quiet || git commit -m "Update calendar"
-          git push
+          python3 <<'PY'
+          import re
+          from html.parser import HTMLParser
+          from collections import Counter
+
+          html = open("rapla.html", encoding="utf-8", errors="replace").read()
+
+          # Persönliche RAPLA-Zugangsdaten entfernen
+          safe = re.sub(
+              r'([?&]key=)[^&"\'\s<>]+',
+              r'\1[REDACTED]',
+              html,
+              flags=re.I
+          )
+          safe = re.sub(
+              r'([?&]salt=)[^&"\'\s<>]+',
+              r'\1[REDACTED]',
+              safe,
+              flags=re.I
+          )
+
+          class Inspector(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.tags = Counter()
+                  self.classes = Counter()
+                  self.ids = Counter()
+                  self.title = []
+                  self.in_title = False
+
+              def handle_starttag(self, tag, attrs):
+                  self.tags[tag] += 1
+                  attrs = dict(attrs)
+
+                  if tag == "title":
+                      self.in_title = True
+
+                  for cls in attrs.get("class", "").split():
+                      self.classes[cls] += 1
+
+                  if attrs.get("id"):
+                      self.ids[attrs["id"]] += 1
+
+              def handle_endtag(self, tag):
+                  if tag == "title":
+                      self.in_title = False
+
+              def handle_data(self, data):
+                  if self.in_title:
+                      self.title.append(data.strip())
+
+          parser = Inspector()
+          parser.feed(safe)
+
+          with open("diagnostic.txt", "w", encoding="utf-8") as f:
+              f.write("=== RAPLA DIAGNOSTIC ===\n\n")
+
+              f.write("Title:\n")
+              f.write(" ".join(x for x in parser.title if x) + "\n\n")
+
+              f.write("Most common HTML tags:\n")
+              for tag, count in parser.tags.most_common(30):
+                  f.write(f"{tag}: {count}\n")
+
+              f.write("\nClasses:\n")
+              for cls, count in parser.classes.most_common(100):
+                  f.write(f"{cls}: {count}\n")
+
+              f.write("\nIDs:\n")
+              for ident, count in parser.ids.most_common(100):
+                  f.write(f"{ident}: {count}\n")
+
+              f.write("\n=== SANITIZED HTML SAMPLE ===\n")
+              f.write(safe[:30000])
+
+          print("diagnostic.txt created")
+          PY
+
+      - name: Upload diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapla-diagnostic
+          path: diagnostic.txt
+          retention-days: 1
