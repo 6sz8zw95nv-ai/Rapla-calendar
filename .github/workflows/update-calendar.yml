@@ -1,0 +1,41 @@
+name: Update RAPLA Calendar
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */3 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Create output folder
+        run: mkdir -p output
+
+      - name: Generate ICS
+        run: |
+          docker run --rm \
+            -e RAPLA_URL="${{ secrets.RAPLA_URL }}" \
+            -e RAPLA_START_YEAR="2026" \
+            -e RAPLA_COURSE="VS-WBK25A" \
+            -v "$PWD/output:/app/ics_files" \
+            juliangroshaupt/dhbw_rapla-to-ics
+
+      - name: Find calendar file
+        run: |
+          find output -name "CALENDAR.ics" -exec cp {} calendar.ics \;
+
+      - name: Commit calendar
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add calendar.ics
+          git diff --cached --quiet || git commit -m "Update calendar"
+          git push
